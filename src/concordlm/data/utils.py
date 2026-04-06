@@ -56,10 +56,15 @@ def apply_chat_template(
             "Expected 'messages', 'instruction', or 'prompt'."
         )
 
-    formatted = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=False
-    )
-    return {"text": formatted}
+    try:
+        formatted = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False
+        )
+        return {"text": formatted}
+    except Exception as e:
+        # Some datasets have back-to-back user messages or malformed roles
+        # that break rigid templates (like Mistral's). Return empty to filter out.
+        return {"text": ""}
 
 
 def format_preference_example(

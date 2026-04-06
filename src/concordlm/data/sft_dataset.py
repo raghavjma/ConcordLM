@@ -61,7 +61,7 @@ def load_sft_dataset(
         lambda ex: apply_chat_template(ex, tokenizer, system_prompt=system_prompt),
         num_proc=data_config.preprocessing_num_workers,
         desc="Applying chat template",
-    )
+    ).filter(lambda x: len(x.get("text", "")) > 0, desc="Filtering invalid templates")
 
     # Keep only the formatted text column
     keep_cols = {"text"}
