@@ -72,6 +72,8 @@ def run_sft(config: PipelineConfig) -> str:
         seed=config.training.seed,
         report_to=config.training.report_to,
         dataloader_num_workers=config.training.dataloader_num_workers,
+        max_length=config.data.max_seq_length,
+        packing=config.data.packing,
     )
 
     trainer = SFTTrainer(
@@ -79,8 +81,6 @@ def run_sft(config: PipelineConfig) -> str:
         args=sft_config,
         train_dataset=dataset["train"],
         eval_dataset=dataset["eval"],
-        max_seq_length=config.data.max_seq_length,
-        packing=config.data.packing,
         processing_class=tokenizer,
         peft_config=peft_config,
     )
