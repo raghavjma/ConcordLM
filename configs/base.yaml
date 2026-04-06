@@ -8,7 +8,7 @@ model:
   quantization: "4bit"          # "none" | "4bit" | "8bit"
   dtype: "bfloat16"             # "float32" | "float16" | "bfloat16"
   trust_remote_code: false
-  use_flash_attention: true     # Use Flash Attention 2 if available
+  use_flash_attention: false    # Requires NVIDIA GPU / CUDA. Set to true if on a cloud GPU.
   max_seq_length: 2048
 
 lora:
