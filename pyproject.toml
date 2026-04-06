@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "concordlm"
+version = "0.1.0"
+description = "End-to-end LLM alignment pipeline — SFT → DPO → RLHF with LoRA/QLoRA"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "ConcordLM Contributors" },
+]
+
+dependencies = [
+    "torch>=2.2.0",
+    "transformers>=4.45.0",
+    "trl>=0.12.0",
+    "peft>=0.13.0",
+    "datasets>=3.0.0",
+    "bitsandbytes>=0.44.0",
+    "accelerate>=1.0.0",
+    "evaluate>=0.4.0",
+    "scipy>=1.11.0",
+    "pyyaml>=6.0",
+    "rich>=13.0.0",
+    "tqdm>=4.66.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.6",
+]
+
+[project.optional-dependencies]
+wandb = ["wandb>=0.16.0"]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0",
+]
+all = ["concordlm[wandb,dev]"]
+
+[project.scripts]
+concordlm-sft = "concordlm.trainers.sft:main"
+concordlm-dpo = "concordlm.trainers.dpo:main"
+concordlm-rlhf = "concordlm.trainers.rlhf:main"
+concordlm-eval = "concordlm.eval.benchmark:main"
+concordlm-generate = "concordlm.inference.generate:main"
+concordlm-web = "web.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
