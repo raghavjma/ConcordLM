@@ -138,6 +138,8 @@ def load_model_for_training(
 
     if model_config.use_flash_attention:
         model_kwargs["attn_implementation"] = "flash_attention_2"
+    else:
+        model_kwargs["attn_implementation"] = "eager"
 
     model = AutoModelForCausalLM.from_pretrained(
         model_config.name,
