@@ -57,6 +57,7 @@ def run_sft(config: PipelineConfig) -> str:
         per_device_eval_batch_size=config.training.per_device_eval_batch_size,
         gradient_accumulation_steps=config.training.gradient_accumulation_steps,
         gradient_checkpointing=config.training.gradient_checkpointing,
+        optim=config.training.optim,
         learning_rate=config.training.learning_rate,
         bf16=config.training.bf16,
         fp16=config.training.fp16,

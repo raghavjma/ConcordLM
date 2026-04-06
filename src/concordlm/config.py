@@ -62,6 +62,7 @@ class TrainingConfig:
     per_device_eval_batch_size: int = 2
     gradient_accumulation_steps: int = 4
     gradient_checkpointing: bool = True
+    optim: str = "paged_adamw_8bit"
     bf16: bool = True
     fp16: bool = False
     logging_steps: int = 10
