@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="ConcordLM — End-to-end LLM Alignment Pipeline Dashboard" />
+  <title>ConcordLM — Alignment Pipeline</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔮</text></svg>">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     Toast Notifications
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="toast-container" id="toastContainer"></div>
+
+<div class="app-layout">
+
+  <!-- ═════════════════════════════════════════════════════════════
+       Sidebar
+       ═════════════════════════════════════════════════════════════ -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-logo">
+        <div class="logo-icon">🔮</div>
+        <div>
+          <h1>ConcordLM</h1>
+          <span class="version">v0.1.0</span>
+        </div>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-section-title">Overview</div>
+        <div class="nav-item active" data-page="dashboard" id="nav-dashboard">
+          <span class="icon">📊</span> Dashboard
+        </div>
+      </div>
+
+      <div class="nav-section">
+        <div class="nav-section-title">Pipeline</div>
+        <div class="nav-item" data-page="training" id="nav-training">
+          <span class="icon">🚀</span> Training
+        </div>
+        <div class="nav-item" data-page="config" id="nav-config">
+          <span class="icon">⚙️</span> Configuration
+        </div>
+        <div class="nav-item" data-page="datasets" id="nav-datasets">
+          <span class="icon">📦</span> Datasets
+        </div>
+      </div>
+
+      <div class="nav-section">
+        <div class="nav-section-title">Results</div>
+        <div class="nav-item" data-page="evaluation" id="nav-evaluation">
+          <span class="icon">📈</span> Evaluation
+        </div>
+        <div class="nav-item" data-page="chat" id="nav-chat">
+          <span class="icon">💬</span> Chat
+        </div>
+        <div class="nav-item" data-page="models" id="nav-models">
+          <span class="icon">🧠</span> Models
+        </div>
+      </div>
+    </nav>
+
+    <div class="sidebar-footer">
+      <span class="status-dot"></span>
+      <span style="font-size:12px;color:var(--text-tertiary)">Pipeline Ready</span>
+    </div>
+  </aside>
+
+  <!-- ═════════════════════════════════════════════════════════════
+       Main Content
+       ═════════════════════════════════════════════════════════════ -->
+  <main class="main-content">
+
+    <!-- ─── Dashboard ─── -->
+    <div class="page active" id="page-dashboard">
+      <div class="content-header">
+        <div>
+          <h2>Dashboard</h2>
+          <div class="subtitle">End-to-end LLM alignment pipeline overview</div>
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="refreshStatus()">
+          ↻ Refresh
+        </button>
+      </div>
+      <div class="content-body">
+        <!-- Pipeline Flow -->
+        <div class="section">
+          <div class="pipeline-flow" id="pipelineFlow">
+            <div class="pipeline-node" id="node-sft" data-page="training" onclick="navigateTo('training')">
+              <div class="node-icon">📚</div>
+              <div class="node-label">SFT</div>
+              <div class="node-status" id="sft-status">
+                <span class="tag tag-amber">Pending</span>
+              </div>
+            </div>
+            <div class="pipeline-arrow" id="arrow-sft">→</div>
+            <div class="pipeline-node" id="node-dpo" onclick="navigateTo('training')">
+              <div class="node-icon">🎯</div>
+              <div class="node-label">DPO</div>
+              <div class="node-status" id="dpo-status">
+                <span class="tag tag-amber">Pending</span>
+              </div>
+            </div>
+            <div class="pipeline-arrow" id="arrow-dpo">→</div>
+            <div class="pipeline-node" id="node-rlhf" onclick="navigateTo('training')">
+              <div class="node-icon">🏆</div>
+              <div class="node-label">RLHF</div>
+              <div class="node-status" id="rlhf-status">
+                <span class="tag tag-cyan">Optional</span>
+              </div>
+            </div>
+            <div class="pipeline-arrow">→</div>
+            <div class="pipeline-node" id="node-eval" onclick="navigateTo('evaluation')">
+              <div class="node-icon">📈</div>
+              <div class="node-label">Evaluate</div>
+              <div class="node-status" id="eval-status">
+                <span class="tag tag-amber">Pending</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Stats Grid -->
+        <div class="grid grid-4 section" id="statsGrid">
+          <div class="card stat-card">
+            <div class="card-icon indigo">🔮</div>
+            <div class="stat-value gradient" id="stat-stage">—</div>
+            <div class="stat-label">Current Stage</div>
+          </div>
+          <div class="card stat-card">
+            <div class="card-icon green">✅</div>
+            <div class="stat-value" id="stat-completed" style="color:var(--accent-success)">0/3</div>
+            <div class="stat-label">Stages Completed</div>
+          </div>
+          <div class="card stat-card">
+            <div class="card-icon cyan">🧠</div>
+            <div class="stat-value" id="stat-models" style="color:var(--accent-info)">0</div>
+            <div class="stat-label">Model Checkpoints</div>
+          </div>
+          <div class="card stat-card">
+            <div class="card-icon amber">⏱️</div>
+            <div class="stat-value" id="stat-jobs" style="color:var(--accent-warning)">0</div>
+            <div class="stat-label">Active Jobs</div>
+          </div>
+        </div>
+
+        <!-- Stage Cards -->
+        <div class="section-title">Pipeline Stages</div>
+        <div class="grid grid-3 section">
+          <div class="card stage-card sft" onclick="navigateTo('training')">
+            <div class="stage-number">Stage 1</div>
+            <div class="stage-name">Supervised Fine-Tuning</div>
+            <div class="stage-desc">Teach the base model to follow instructions using LoRA/QLoRA adapters.</div>
+            <div class="flex items-center justify-between">
+              <div class="stage-status pending" id="sft-stage-status">⏳ Pending</div>
+              <span class="tag tag-indigo">SFTTrainer</span>
+            </div>
+          </div>
+          <div class="card stage-card dpo" onclick="navigateTo('training')">
+            <div class="stage-number">Stage 2</div>
+            <div class="stage-name">Direct Preference Optimization</div>
+            <div class="stage-desc">Align the model to human preferences using chosen/rejected pairs. β=0.1</div>
+            <div class="flex items-center justify-between">
+              <div class="stage-status pending" id="dpo-stage-status">⏳ Pending</div>
+              <span class="tag tag-green">DPOTrainer</span>
+            </div>
+          </div>
+          <div class="card stage-card rlhf" onclick="navigateTo('training')">
+            <div class="stage-number">Stage 3 · Optional</div>
+            <div class="stage-name">RLHF with PPO</div>
+            <div class="stage-desc">Fine-grained alignment via reward model and Proximal Policy Optimization.</div>
+            <div class="flex items-center justify-between">
+              <div class="stage-status pending" id="rlhf-stage-status">⏳ Optional</div>
+              <span class="tag tag-amber">PPOTrainer</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Eval Summary -->
+        <div class="section">
+          <div class="section-title">Latest Evaluation</div>
+          <div class="card" id="evalSummaryCard">
+            <div class="empty-state">
+              <div class="icon">📈</div>
+              <h3>No evaluation yet</h3>
+              <p>Complete training and run evaluation to see safety & quality metrics here.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Training ─── -->
+    <div class="page" id="page-training">
+      <div class="content-header">
+        <div>
+          <h2>Training</h2>
+          <div class="subtitle">Launch and monitor alignment training jobs</div>
+        </div>
+      </div>
+      <div class="content-body">
+        <!-- Launch Training -->
+        <div class="section">
+          <div class="section-title">Launch Training Job</div>
+          <div class="card">
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">Pipeline Stage</label>
+                <select class="form-select" id="trainStage">
+                  <option value="sft">Stage 1 — SFT (Supervised Fine-Tuning)</option>
+                  <option value="dpo">Stage 2 — DPO (Direct Preference Optimization)</option>
+                  <option value="rlhf">Stage 3 — RLHF (Reward Model + PPO)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Base Model</label>
+                <select class="form-select" id="trainModel">
+                  <option value="mistralai/Mistral-7B-Instruct-v0.3">Mistral-7B-Instruct-v0.3</option>
+                  <option value="meta-llama/Llama-3-8B-Instruct">Llama-3-8B-Instruct</option>
+                  <option value="Qwen/Qwen2.5-0.5B-Instruct">Qwen-2.5-0.5B (Smoke Test)</option>
+                  <option value="Qwen/Qwen2.5-1.5B-Instruct">Qwen-2.5-1.5B</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">Quantization</label>
+                <select class="form-select" id="trainQuant">
+                  <option value="4bit">QLoRA 4-bit (Recommended)</option>
+                  <option value="8bit">8-bit</option>
+                  <option value="none">Full Precision</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Training Steps</label>
+                <input class="form-input" type="number" id="trainMaxSteps" value="-1" />
+                <div class="form-hint">-1 = use num_train_epochs from config</div>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">Learning Rate</label>
+                <input class="form-input" type="text" id="trainLR" placeholder="Auto (from config)" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Samples</label>
+                <input class="form-input" type="number" id="trainMaxSamples" placeholder="All" />
+                <div class="form-hint">Limit dataset size for faster runs</div>
+              </div>
+            </div>
+            <div class="form-group" id="sftModelGroup" style="display:none">
+              <label class="form-label">SFT Model Path (for DPO)</label>
+              <input class="form-input" type="text" id="trainSftModel" placeholder="./outputs/sft/checkpoint-final" />
+            </div>
+            <div class="mt-4" style="display:flex;gap:12px">
+              <button class="btn btn-primary btn-lg" onclick="startTraining()">
+                🚀 Start Training
+              </button>
+              <button class="btn btn-secondary btn-lg" onclick="startSmokeTest()">
+                ⚡ Quick Smoke Test
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Active Jobs -->
+        <div class="section">
+          <div class="section-title">Training Jobs</div>
+          <div id="jobsList">
+            <div class="empty-state">
+              <div class="icon">🚀</div>
+              <h3>No active training jobs</h3>
+              <p>Launch a training job above to get started.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Configuration ─── -->
+    <div class="page" id="page-config">
+      <div class="content-header">
+        <div>
+          <h2>Configuration</h2>
+          <div class="subtitle">View and edit YAML pipeline configurations</div>
+        </div>
+      </div>
+      <div class="content-body">
+        <div class="config-editor">
+          <div class="config-tabs">
+            <div class="config-tab active" data-config="base" onclick="loadConfig('base', this)">Base</div>
+            <div class="config-tab" data-config="sft" onclick="loadConfig('sft', this)">SFT</div>
+            <div class="config-tab" data-config="dpo" onclick="loadConfig('dpo', this)">DPO</div>
+            <div class="config-tab" data-config="rlhf" onclick="loadConfig('rlhf', this)">RLHF</div>
+          </div>
+          <div class="config-content">
+            <textarea class="form-textarea" id="configEditor" rows="25" style="min-height:500px"></textarea>
+            <div class="mt-4" style="display:flex;gap:12px">
+              <button class="btn btn-primary" onclick="saveConfig()">💾 Save Config</button>
+              <button class="btn btn-secondary" onclick="resetConfig()">↻ Reset</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Datasets ─── -->
+    <div class="page" id="page-datasets">
+      <div class="content-header">
+        <div>
+          <h2>Datasets</h2>
+          <div class="subtitle">Build and manage preference datasets for alignment</div>
+        </div>
+        <button class="btn btn-primary" onclick="addPair()">+ Add Pair</button>
+      </div>
+      <div class="content-body">
+        <!-- Existing Datasets -->
+        <div class="section">
+          <div class="section-title">Available Datasets</div>
+          <div id="datasetList" class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Pairs</th>
+                  <th>Size</th>
+                  <th>Modified</th>
+                </tr>
+              </thead>
+              <tbody id="datasetTableBody">
+                <tr><td colspan="4" class="text-center" style="padding:24px;color:var(--text-tertiary)">No custom datasets yet</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Dataset Builder -->
+        <div class="section">
+          <div class="section-title">Build Custom Preference Dataset</div>
+          <div class="card">
+            <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">
+              Create preference pairs with a <strong>prompt</strong>, a <strong>chosen</strong> (preferred) response,
+              and a <strong>rejected</strong> (dispreferred) response.
+            </p>
+            <div id="pairsContainer">
+              <!-- Pairs added dynamically -->
+            </div>
+            <div class="mt-4 form-row">
+              <div class="form-group">
+                <label class="form-label">Dataset Name</label>
+                <input class="form-input" type="text" id="datasetName" value="custom_preferences.jsonl" />
+              </div>
+              <div class="form-group" style="display:flex;align-items:flex-end">
+                <button class="btn btn-success btn-block" onclick="buildDataset()">
+                  📦 Build Dataset
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Evaluation ─── -->
+    <div class="page" id="page-evaluation">
+      <div class="content-header">
+        <div>
+          <h2>Evaluation</h2>
+          <div class="subtitle">Safety and quality metrics for aligned models</div>
+        </div>
+        <button class="btn btn-primary" onclick="runEvaluation()">▶ Run Evaluation</button>
+      </div>
+      <div class="content-body">
+        <!-- Eval controls -->
+        <div class="section">
+          <div class="card">
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">Model to Evaluate</label>
+                <input class="form-input" type="text" id="evalModelPath" placeholder="./outputs/dpo/checkpoint-final" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Compare Against (Optional)</label>
+                <input class="form-input" type="text" id="evalComparePath" placeholder="./outputs/sft/checkpoint-final" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Results -->
+        <div id="evalResults">
+          <div class="empty-state">
+            <div class="icon">📈</div>
+            <h3>No evaluation results</h3>
+            <p>Run an evaluation above to see safety & quality metrics.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Chat ─── -->
+    <div class="page" id="page-chat">
+      <div class="content-header">
+        <div>
+          <h2>Chat</h2>
+          <div class="subtitle">Interactive conversation with your aligned model</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input class="form-input" type="text" id="chatModelPath" placeholder="./outputs/dpo/checkpoint-final" style="width:300px;font-size:12px" />
+        </div>
+      </div>
+      <div class="content-body" style="padding:0">
+        <div class="chat-container card" style="border-radius:0;border-left:none;border-right:none">
+          <div class="chat-messages" id="chatMessages">
+            <div class="empty-state" id="chatEmptyState">
+              <div class="icon">💬</div>
+              <h3>Start a conversation</h3>
+              <p>Enter a model checkpoint path above and type a message below to chat with your aligned model.</p>
+            </div>
+          </div>
+          <div class="chat-input-area">
+            <input class="form-input" type="text" id="chatInput" placeholder="Type your message..." onkeydown="if(event.key==='Enter')sendChat()" autocomplete="off" />
+            <button class="btn btn-primary" onclick="sendChat()" id="chatSendBtn">
+              Send →
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Models ─── -->
+    <div class="page" id="page-models">
+      <div class="content-header">
+        <div>
+          <h2>Model Checkpoints</h2>
+          <div class="subtitle">Available trained model checkpoints</div>
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="loadModels()">↻ Refresh</button>
+      </div>
+      <div class="content-body">
+        <div id="modelsList">
+          <div class="empty-state">
+            <div class="icon">🧠</div>
+            <h3>No model checkpoints</h3>
+            <p>Train a model to see checkpoints here.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
