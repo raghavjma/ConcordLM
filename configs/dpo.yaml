@@ -1,0 +1,28 @@
+# ============================================================
+# ConcordLM — DPO (Direct Preference Optimization) Config
+# Stage 2: Align to human preferences
+# ============================================================
+
+inherit: base.yaml
+
+stage: "dpo"
+
+training:
+  output_dir: "./outputs/dpo"
+  learning_rate: 5.0e-7          # Much lower than SFT for stability
+  num_train_epochs: 1
+  max_steps: -1
+
+dpo:
+  beta: 0.1                     # KL penalty coefficient
+  loss_type: "sigmoid"           # "sigmoid" | "ipo" | "hinge" | "robust"
+  label_smoothing: 0.0
+  max_length: 1024
+  max_prompt_length: 512
+
+data:
+  dataset_name: "trl-lib/ultrafeedback_binarized"
+  dataset_split: "train"
+
+# Optional: path to SFT checkpoint to use as starting model
+sft_model_path: null             # e.g., "./outputs/sft/checkpoint-final"

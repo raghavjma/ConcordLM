@@ -1,0 +1,21 @@
+# ============================================================
+# ConcordLM — SFT (Supervised Fine-Tuning) Configuration
+# Stage 1: Teach the model instruction-following
+# ============================================================
+
+inherit: base.yaml
+
+stage: "sft"
+
+training:
+  output_dir: "./outputs/sft"
+  learning_rate: 2.0e-4
+  num_train_epochs: 3
+  max_steps: -1                  # -1 = use num_train_epochs
+
+data:
+  dataset_name: "tatsu-lab/alpaca"
+  dataset_split: "train"
+  text_field: null               # Auto-detected from dataset format
+  max_seq_length: 2048
+  packing: false                 # Sequence packing for efficiency
