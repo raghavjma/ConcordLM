@@ -264,7 +264,6 @@ def run_grpo(
 
     from concordlm.models.loader import (
         _build_lora_config,
-        load_model,
         load_tokenizer,
     )
 
@@ -404,7 +403,7 @@ def run_rloo(
     """
     from trl import RLOOConfig, RLOOTrainer
 
-    from concordlm.models.loader import load_model, load_tokenizer
+    from concordlm.models.loader import _build_lora_config, load_tokenizer
 
     logger.info("=" * 60)
     logger.info("  ConcordLM — Stage 3B: RLOO Policy Optimization")
