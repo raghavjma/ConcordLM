@@ -278,17 +278,11 @@ def run_grpo(
     logger.info(f"Reward model: {reward_model_path}")
     logger.info(f"GRPO β={config.grpo.beta}, loss_type={config.grpo.loss_type}")
 
-    # --- Load model and tokenizer ---
-    try:
-        from peft import PeftModel
-        logger.info(f"Attempting to load policy as PEFT model: {model_name}")
-        base_model, tokenizer, _ = load_model(config.model, peft_config=None)
-        model = PeftModel.from_pretrained(base_model, model_name, is_trainable=True)
-        peft_config = None
-        logger.info("Loaded policy model as PEFT adapter.")
-    except Exception as e:
-        logger.info(f"Loading policy as standard model. ({e})")
-        model, tokenizer, peft_config = load_model(config.model, config.lora)
+    # --- Load tokenizer ---
+    tokenizer = load_tokenizer(
+        config.model.name,
+        trust_remote_code=config.model.trust_remote_code,
+    )
 
     # --- Build prompt dataset ---
     prompt_dataset = _build_prompt_dataset(config, tokenizer)
@@ -314,6 +308,22 @@ def run_grpo(
         }
     elif config.model.quantization == "8bit":
         model_init_kwargs["quantization_config"] = {"load_in_8bit": True}
+
+    # --- Load model ---
+    peft_config = _build_lora_config(config.lora)
+    try:
+        from peft import AutoPeftModelForCausalLM
+        logger.info(f"Attempting to load policy as PEFT model: {model_name}")
+        model = AutoPeftModelForCausalLM.from_pretrained(
+            model_name,
+            is_trainable=True,
+            **model_init_kwargs,
+        )
+        peft_config = None
+        logger.info("Loaded policy model as PEFT adapter.")
+    except Exception as e:
+        logger.info(f"Loading policy as standard model. ({e})")
+        model = model_name  # Let GRPOTrainer handle it via string
 
     grpo_config = GRPOConfig(
         output_dir=config.training.output_dir,
@@ -404,17 +414,11 @@ def run_rloo(
     logger.info(f"Policy model: {model_name}")
     logger.info(f"Reward model: {reward_model_path}")
 
-    # --- Load model and tokenizer ---
-    try:
-        from peft import PeftModel
-        logger.info(f"Attempting to load policy as PEFT model: {model_name}")
-        base_model, tokenizer, _ = load_model(config.model, peft_config=None)
-        model = PeftModel.from_pretrained(base_model, model_name, is_trainable=True)
-        peft_config = None
-        logger.info("Loaded policy model as PEFT adapter.")
-    except Exception as e:
-        logger.info(f"Loading policy as standard model. ({e})")
-        model, tokenizer, peft_config = load_model(config.model, config.lora)
+    # --- Load tokenizer ---
+    tokenizer = load_tokenizer(
+        config.model.name,
+        trust_remote_code=config.model.trust_remote_code,
+    )
 
     prompt_dataset = _build_prompt_dataset(config, tokenizer)
     reward_fn = _create_reward_function(reward_model_path, config)
@@ -432,6 +436,22 @@ def run_rloo(
             "bnb_4bit_compute_dtype": "bfloat16",
             "bnb_4bit_use_double_quant": True,
         }
+
+    # --- Load model ---
+    peft_config = _build_lora_config(config.lora)
+    try:
+        from peft import AutoPeftModelForCausalLM
+        logger.info(f"Attempting to load policy as PEFT model: {model_name}")
+        model = AutoPeftModelForCausalLM.from_pretrained(
+            model_name,
+            is_trainable=True,
+            **model_init_kwargs,
+        )
+        peft_config = None
+        logger.info("Loaded policy model as PEFT adapter.")
+    except Exception as e:
+        logger.info(f"Loading policy as standard model. ({e})")
+        model = model_name
 
     rloo_config = RLOOConfig(
         output_dir=config.training.output_dir,
