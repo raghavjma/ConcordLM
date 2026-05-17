@@ -16,6 +16,9 @@ from concordlm.config import PipelineConfig, load_config
 
 logger = logging.getLogger(__name__)
 
+# Suppress the incredibly noisy tokenization warnings from TRL's DPOTrainer
+logging.getLogger("trl.trainer.dpo_trainer").setLevel(logging.ERROR)
+
 
 def _resolve_starting_model(config: PipelineConfig) -> str:
     """Determine the starting model path/name for DPO.
