@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -74,12 +74,16 @@ class TrainingRequest(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str
+    messages: list[dict[str, str]]
     model_path: str
     max_new_tokens: int = 512
     temperature: float = 0.7
     top_p: float = 0.9
+    stream: bool = False
     system_prompt: Optional[str] = None
+
+class StopRequest(BaseModel):
+    model_path: str
 
 
 class DatasetBuildRequest(BaseModel):
@@ -91,6 +95,12 @@ class EvalRequest(BaseModel):
     model_path: str
     compare_model_path: Optional[str] = None
     max_samples: Optional[int] = None
+
+
+class PipelineRequest(BaseModel):
+    stages: list[str] = ["sft", "dpo"]  # e.g. ["sft", "dpo", "rlhf"]
+    config_overrides: dict[str, Any] = {}
+    method: str = "grpo"  # RLHF method: "grpo" | "rloo"
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +127,9 @@ async def get_status():
     # Check for existing checkpoints
     sft_exists = (OUTPUTS_DIR / "sft" / "checkpoint-final").exists()
     dpo_exists = (OUTPUTS_DIR / "dpo" / "checkpoint-final").exists()
-    rlhf_exists = (OUTPUTS_DIR / "rlhf" / "ppo-final").exists()
+    rlhf_grpo_exists = (OUTPUTS_DIR / "rlhf" / "grpo-final").exists()
+    rlhf_rloo_exists = (OUTPUTS_DIR / "rlhf" / "rloo-final").exists()
+    rlhf_exists = rlhf_grpo_exists or rlhf_rloo_exists
     reward_exists = (OUTPUTS_DIR / "reward_model" / "checkpoint-final").exists()
 
     # Check for eval reports
@@ -127,15 +139,30 @@ async def get_status():
         with open(eval_path) as f:
             eval_report = json.load(f)
 
+    # Check for pipeline manifest
+    pipeline_manifest = None
+    manifest_path = OUTPUTS_DIR / "pipeline_manifest.json"
+    if manifest_path.exists():
+        with open(manifest_path) as f:
+            pipeline_manifest = json.load(f)
+
+    rlhf_method = "grpo" if rlhf_grpo_exists else ("rloo" if rlhf_rloo_exists else None)
+    rlhf_path = None
+    if rlhf_grpo_exists:
+        rlhf_path = str(OUTPUTS_DIR / "rlhf" / "grpo-final")
+    elif rlhf_rloo_exists:
+        rlhf_path = str(OUTPUTS_DIR / "rlhf" / "rloo-final")
+
     return {
         "pipeline": {
             "sft": {"completed": sft_exists, "path": str(OUTPUTS_DIR / "sft" / "checkpoint-final") if sft_exists else None},
             "dpo": {"completed": dpo_exists, "path": str(OUTPUTS_DIR / "dpo" / "checkpoint-final") if dpo_exists else None},
-            "rlhf": {"completed": rlhf_exists, "path": str(OUTPUTS_DIR / "rlhf" / "ppo-final") if rlhf_exists else None},
-            "reward_model": {"completed": reward_exists},
+            "rlhf": {"completed": rlhf_exists, "path": rlhf_path, "method": rlhf_method},
+            "reward_model": {"completed": reward_exists, "path": str(OUTPUTS_DIR / "reward_model" / "checkpoint-final") if reward_exists else None},
         },
         "active_jobs": {jid: {"stage": j["stage"], "status": j["status"], "started_at": j["started_at"]} for jid, j in _active_jobs.items()},
         "eval_report": eval_report,
+        "pipeline_manifest": pipeline_manifest,
     }
 
 
@@ -287,6 +314,41 @@ async def stop_training(job_id: str):
     return {"status": job["status"]}
 
 
+@app.post("/api/train/pipeline")
+async def start_pipeline(req: PipelineRequest):
+    """Launch a full alignment pipeline (SFT → DPO → RLHF)."""
+    job_id = str(uuid.uuid4())[:8]
+
+    # Build command
+    stages_str = ",".join(req.stages)
+    cmd = [
+        sys.executable, str(PROJECT_ROOT / "scripts" / "run_pipeline.py"),
+        "--stages", stages_str,
+        "--config-dir", str(CONFIGS_DIR),
+    ]
+
+    # Add overrides
+    override_args = []
+    for key, value in req.config_overrides.items():
+        override_args.extend(["--override", f"{key}={value}"])
+    if req.method:
+        override_args.extend(["--override", f"method={req.method}"])
+    cmd.extend(override_args)
+
+    _active_jobs[job_id] = {
+        "stage": f"pipeline({stages_str})",
+        "status": "running",
+        "started_at": datetime.now().isoformat(),
+        "command": " ".join(cmd),
+        "process": None,
+    }
+    _training_logs[job_id] = []
+
+    asyncio.create_task(_run_training_process(job_id, cmd))
+
+    return {"job_id": job_id, "status": "started", "stages": req.stages}
+
+
 # ---------------------------------------------------------------------------
 # WebSocket for live logs
 # ---------------------------------------------------------------------------
@@ -331,9 +393,6 @@ async def chat(req: ChatRequest):
     """Chat with a trained model."""
     model_path = req.model_path
 
-    if not Path(model_path).exists():
-        raise HTTPException(404, f"Model not found: {model_path}")
-
     try:
         # Lazy-load generator
         if model_path not in _loaded_generators:
@@ -344,16 +403,37 @@ async def chat(req: ChatRequest):
             )
 
         generator = _loaded_generators[model_path]
-        response = generator.generate(
-            req.message,
-            max_new_tokens=req.max_new_tokens,
-            temperature=req.temperature,
-            top_p=req.top_p,
-        )
-        return {"response": response, "model_path": model_path}
+        
+        if req.stream:
+            def stream_generator():
+                for chunk in generator.generate_stream(
+                    req.messages,
+                    max_new_tokens=req.max_new_tokens,
+                    temperature=req.temperature,
+                    top_p=req.top_p,
+                ):
+                    yield chunk
+            return StreamingResponse(stream_generator(), media_type="text/plain")
+        else:
+            response = generator.generate(
+                req.messages,
+                max_new_tokens=req.max_new_tokens,
+                temperature=req.temperature,
+                top_p=req.top_p,
+            )
+            return {"response": response, "model_path": model_path}
 
     except Exception as e:
         raise HTTPException(500, f"Generation failed: {e}")
+
+@app.post("/api/chat/stop")
+async def stop_chat(req: StopRequest):
+    """Signal the active inference engine to abort generating immediately."""
+    if req.model_path in _loaded_generators:
+        generator = _loaded_generators[req.model_path]
+        generator.is_aborted = True
+        return {"status": "success"}
+    return {"status": "ignored"}
 
 
 # ---------------------------------------------------------------------------

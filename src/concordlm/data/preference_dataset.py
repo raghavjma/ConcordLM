@@ -27,10 +27,44 @@ logger = logging.getLogger(__name__)
 
 
 def _adapt_ultrafeedback(example: dict[str, Any]) -> dict[str, Any]:
-    """Adapt trl-lib/ultrafeedback_binarized to standard conversational DPO format."""
-    # This dataset already comes in the correct format for DPOTrainer
-    # with columns: prompt, chosen, rejected in conversational format
-    return example
+    """Adapt trl-lib/ultrafeedback_binarized to standard DPO format.
+
+    TRL v1.0 native format: ``chosen`` and ``rejected`` are full conversations
+    (list of message dicts) where the prompt is embedded as the first user message.
+    DPOTrainer v1.0 handles this natively — no separate ``prompt`` column needed.
+
+    We extract the prompt for downstream use (e.g., GRPO prompt-only datasets).
+    """
+    chosen = example.get("chosen", [])
+    rejected = example.get("rejected", [])
+
+    # Extract prompt from the first user message in chosen
+    prompt = []
+    response_chosen = []
+    response_rejected = []
+
+    if isinstance(chosen, list) and len(chosen) > 0:
+        # Split into prompt turns and response turns
+        for msg in chosen:
+            if msg.get("role") == "user":
+                prompt.append(msg)
+            else:
+                response_chosen.append(msg)
+
+        for msg in (rejected if isinstance(rejected, list) else []):
+            if msg.get("role") != "user":
+                response_rejected.append(msg)
+
+    result = {
+        "chosen": chosen,
+        "rejected": rejected,
+    }
+
+    # Add prompt if extracted (for compatibility with prompt-based workflows)
+    if prompt:
+        result["prompt"] = prompt
+
+    return result
 
 
 def _adapt_anthropic_hh(example: dict[str, Any]) -> dict[str, Any]:
@@ -82,17 +116,19 @@ def load_preference_dataset(
     tokenizer=None,
 ) -> DatasetDict:
     """
-    Load a preference dataset for DPO training.
+    Load a preference dataset for DPO / RLHF training.
 
     Supports:
     - Hub datasets with known adapters (UltraFeedback, Anthropic HH-RLHF)
-    - Any Hub dataset already in DPO format (prompt, chosen, rejected)
+    - Any Hub dataset in TRL v1.0 DPO format (chosen, rejected as conversations)
+    - Any Hub dataset with explicit (prompt, chosen, rejected) columns
     - Local JSONL files via ``load_preference_dataset_from_jsonl``
 
     Returns
     -------
     DatasetDict with ``train`` and ``eval`` splits.
-    Each example has ``prompt``, ``chosen``, ``rejected`` columns.
+    Each example has at minimum ``chosen``, ``rejected`` columns.
+    May also include ``prompt`` if the format provides it.
     """
     dataset_name = data_config.dataset_name
     logger.info(f"Loading preference dataset: {dataset_name}")
@@ -115,7 +151,7 @@ def load_preference_dataset(
 
     # --- Adapt to standard format ---
     adapter = _ADAPTERS.get(dataset_name)
-    if adapter and adapter is not _adapt_ultrafeedback:
+    if adapter:
         logger.info(f"Applying dataset adapter for: {dataset_name}")
         ds = ds.map(
             adapter,
@@ -124,7 +160,9 @@ def load_preference_dataset(
         )
 
     # --- Validate required columns ---
-    required = {"prompt", "chosen", "rejected"}
+    # TRL v1.0 DPO format requires at minimum chosen + rejected.
+    # prompt is optional (DPOTrainer extracts it from conversations).
+    required = {"chosen", "rejected"}
     missing = required - set(ds.column_names)
     if missing:
         raise ValueError(
@@ -133,6 +171,13 @@ def load_preference_dataset(
             "Consider writing a custom adapter."
         )
 
+    # Remove score columns if present (not needed for training)
+    remove_cols = [c for c in ds.column_names
+                   if c.startswith("score_") or c in ("source", "category")]
+    if remove_cols:
+        ds = ds.remove_columns(remove_cols)
+        logger.info(f"Removed unused columns: {remove_cols}")
+
     # --- Train / eval split ---
     split = ds.train_test_split(test_size=data_config.eval_split_ratio, seed=42)
     result = DatasetDict({"train": split["train"], "eval": split["test"]})
@@ -140,7 +185,8 @@ def load_preference_dataset(
     # --- Stats ---
     logger.info(
         f"Preference dataset ready — "
-        f"train: {len(result['train'])}, eval: {len(result['eval'])}"
+        f"train: {len(result['train'])}, eval: {len(result['eval'])} "
+        f"columns: {result['train'].column_names}"
     )
     log_dataset_sample(result["train"])
 

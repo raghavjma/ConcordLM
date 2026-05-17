@@ -33,11 +33,29 @@ class Generator:
         model_path: str,
         *,
         merge_adapter: bool = True,
-        dtype: str = "bfloat16",
-        device: str = "auto",
+        dtype: str | None = None,
+        device: str | None = None,
         system_prompt: str | None = None,
     ):
+        import torch
         from concordlm.models.loader import load_model_for_inference
+        
+        # Override naive defaults with optimal hardware mappings
+        if device is None:
+            if torch.cuda.is_available():
+                device = "auto"
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = "auto"
+            else:
+                device = "cpu"
+                
+        if dtype is None:
+            # Apple Silicon Unified Memory aggressively favors float16.
+            # bfloat16 forces massive CPU fallbacks on certain M-Series chips!
+            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                dtype = "float16"
+            else:
+                dtype = "bfloat16"
 
         self.model, self.tokenizer = load_model_for_inference(
             model_path,
@@ -47,12 +65,13 @@ class Generator:
         )
         self.system_prompt = system_prompt
         self.device = next(self.model.parameters()).device
+        self.is_aborted = False
         logger.info(f"Generator ready on device: {self.device}")
 
     @torch.inference_mode()
     def generate(
         self,
-        prompt: str,
+        prompt: str | list[dict[str, str]],
         *,
         max_new_tokens: int = 512,
         temperature: float = 0.7,
@@ -66,10 +85,15 @@ class Generator:
 
         The prompt is formatted using the model's chat template.
         """
-        messages = []
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
-        messages.append({"role": "user", "content": prompt})
+        if isinstance(prompt, str):
+            messages = []
+            if self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append({"role": "user", "content": prompt})
+        else:
+            messages = list(prompt)
+            if self.system_prompt and (not messages or messages[0].get("role") != "system"):
+                messages.insert(0, {"role": "system", "content": self.system_prompt})
 
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -91,6 +115,66 @@ class Generator:
         # Decode only new tokens
         new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+    def generate_stream(
+        self,
+        prompt: str | list[dict[str, str]],
+        *,
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: int = 50,
+        repetition_penalty: float = 1.1,
+        do_sample: bool = True,
+    ):
+        """Yield tokens in real-time as they are generated using TextIteratorStreamer."""
+        from transformers import TextIteratorStreamer, StoppingCriteria, StoppingCriteriaList
+        import threading
+
+        self.is_aborted = False
+
+        class AbortGenerationCriteria(StoppingCriteria):
+            def __init__(self, parent):
+                self.parent = parent
+            def __call__(self, input_ids, scores, **kwargs):
+                return self.parent.is_aborted
+
+        if isinstance(prompt, str):
+            messages = []
+            if self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append({"role": "user", "content": prompt})
+        else:
+            messages = list(prompt)
+            if self.system_prompt and (not messages or messages[0].get("role") != "system"):
+                messages.insert(0, {"role": "system", "content": self.system_prompt})
+
+        text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+        
+        streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
+        
+        generation_kwargs = dict(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature if do_sample else 1.0,
+            top_p=top_p if do_sample else 1.0,
+            top_k=top_k if do_sample else 0,
+            repetition_penalty=repetition_penalty,
+            do_sample=do_sample,
+            pad_token_id=self.tokenizer.pad_token_id,
+            streamer=streamer,
+            stopping_criteria=StoppingCriteriaList([AbortGenerationCriteria(self)]),
+        )
+
+        thread = threading.Thread(target=self.model.generate, kwargs=generation_kwargs)
+        thread.start()
+
+        for content in streamer:
+            yield content
 
     def batch_generate(
         self,

@@ -1,9 +1,17 @@
 """
-Stage 3 (Optional) — RLHF with Reward Model + PPO
+Stage 3 (Optional) — RLHF: Reward Model + Policy Optimization
 
 Two-phase pipeline:
   Phase A: Train a reward model on preference data (RewardTrainer).
-  Phase B: Fine-tune the policy model with PPO using the reward model.
+  Phase B: Fine-tune the policy model using Group Relative Policy Optimization
+           (GRPO) with the trained reward model.
+
+TRL v1.0 Migration Notes:
+  - AutoModelForCausalLMWithValueHead has been removed
+  - PPOTrainer has been removed from the core API
+  - GRPOTrainer is the recommended replacement (no value head needed,
+    more memory-efficient, state-of-the-art results)
+  - RLOOTrainer is available as an alternative
 """
 
 from __future__ import annotations
@@ -11,6 +19,8 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from pathlib import Path
+from typing import Any
 
 from concordlm.config import PipelineConfig, load_config
 
@@ -100,16 +110,144 @@ def train_reward_model(config: PipelineConfig) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phase B — PPO Training
+# Phase B — GRPO Training (TRL v1.0)
 # ---------------------------------------------------------------------------
 
 
-def run_ppo(
+def _build_prompt_dataset(config: PipelineConfig, tokenizer):
+    """
+    Build a prompt-only dataset for GRPO training.
+
+    GRPO generates completions on-the-fly, so it only needs prompts.
+    We extract prompts from the preference dataset.
+    """
+    from datasets import Dataset, DatasetDict
+
+    from concordlm.data.preference_dataset import load_preference_dataset
+
+    # Load the full preference dataset to extract prompts
+    pref_dataset = load_preference_dataset(config.data, tokenizer)
+
+    def extract_prompt(example):
+        """Extract just the prompt, formatted for the model."""
+        prompt = example.get("prompt", "")
+
+        # Handle conversational format (list of message dicts)
+        if isinstance(prompt, list):
+            # Apply chat template to format the prompt
+            try:
+                formatted = tokenizer.apply_chat_template(
+                    prompt, tokenize=False, add_generation_prompt=True
+                )
+                return {"prompt": formatted}
+            except Exception:
+                # Fallback: concatenate content
+                text = " ".join(
+                    m.get("content", "") for m in prompt if m.get("role") == "user"
+                )
+                return {"prompt": text}
+
+        return {"prompt": str(prompt)}
+
+    train_prompts = pref_dataset["train"].map(
+        extract_prompt,
+        remove_columns=[c for c in pref_dataset["train"].column_names if c != "prompt"],
+        desc="Extracting prompts for GRPO",
+    )
+    eval_prompts = pref_dataset["eval"].map(
+        extract_prompt,
+        remove_columns=[c for c in pref_dataset["eval"].column_names if c != "prompt"],
+        desc="Extracting eval prompts for GRPO",
+    )
+
+    logger.info(
+        f"GRPO prompt dataset: train={len(train_prompts)}, eval={len(eval_prompts)}"
+    )
+
+    return DatasetDict({"train": train_prompts, "eval": eval_prompts})
+
+
+def _create_reward_function(reward_model_path: str, config: PipelineConfig):
+    """
+    Create a reward function from a trained reward model for GRPO.
+
+    GRPOTrainer expects `reward_funcs` — either a model or a callable
+    that takes (completions, prompts) and returns rewards.
+    """
+    import torch
+    from transformers import (
+        AutoModelForSequenceClassification,
+        AutoTokenizer,
+        pipeline as hf_pipeline,
+    )
+
+    logger.info(f"Loading reward model from: {reward_model_path}")
+
+    # Try loading as PEFT model first
+    try:
+        from peft import AutoPeftModelForSequenceClassification
+
+        reward_model = AutoPeftModelForSequenceClassification.from_pretrained(
+            reward_model_path,
+            num_labels=1,
+            device_map="auto",
+        )
+        reward_model = reward_model.merge_and_unload()
+        logger.info("Loaded reward model as PEFT adapter (merged).")
+    except Exception:
+        reward_model = AutoModelForSequenceClassification.from_pretrained(
+            reward_model_path,
+            num_labels=1,
+            device_map="auto",
+        )
+        logger.info("Loaded reward model as standard classifier.")
+
+    reward_tokenizer = AutoTokenizer.from_pretrained(reward_model_path)
+    if reward_tokenizer.pad_token is None:
+        reward_tokenizer.pad_token = reward_tokenizer.eos_token
+    if reward_model.config.pad_token_id is None:
+        reward_model.config.pad_token_id = reward_tokenizer.pad_token_id
+
+    reward_model.eval()
+
+    def reward_fn(completions: list[str], prompts: list[str] | None = None, **kwargs) -> list[float]:
+        """Score completions using the reward model."""
+        # Build full texts (prompt + completion)
+        if prompts:
+            texts = [p + c for p, c in zip(prompts, completions)]
+        else:
+            texts = completions
+
+        with torch.no_grad():
+            inputs = reward_tokenizer(
+                texts,
+                padding=True,
+                truncation=True,
+                max_length=config.reward_model.max_length,
+                return_tensors="pt",
+            ).to(reward_model.device)
+            outputs = reward_model(**inputs)
+            scores = outputs.logits.squeeze(-1).tolist()
+
+        if isinstance(scores, float):
+            scores = [scores]
+
+        return scores
+
+    return reward_fn
+
+
+def run_grpo(
     config: PipelineConfig,
     reward_model_path: str,
 ) -> str:
     """
-    Fine-tune the policy model using PPO with a trained reward model.
+    Fine-tune the policy model using GRPO with a trained reward model.
+
+    GRPO (Group Relative Policy Optimization) generates multiple completions
+    per prompt, scores them with the reward model, and optimizes the policy
+    to increase the likelihood of higher-reward completions relative to the
+    group baseline.
 
     Parameters
     ----------
@@ -120,20 +258,144 @@ def run_ppo(
 
     Returns
     -------
-    str  Path to the saved PPO-trained model.
+    str  Path to the saved GRPO-trained model.
     """
-    import torch
-    from trl import PPOConfig, PPOTrainer, AutoModelForCausalLMWithValueHead
-    from transformers import pipeline as hf_pipeline
+    from trl import GRPOConfig, GRPOTrainer
 
-    from concordlm.data.preference_dataset import load_preference_dataset
-    from concordlm.models.loader import load_tokenizer, _build_bnb_config, _get_torch_dtype
+    from concordlm.models.loader import (
+        _build_lora_config,
+        load_tokenizer,
+    )
 
     logger.info("=" * 60)
-    logger.info("  ConcordLM — Stage 3B: PPO Training")
+    logger.info("  ConcordLM — Stage 3B: GRPO Policy Optimization")
     logger.info("=" * 60)
 
     # --- Determine starting model ---
+    model_name = config.dpo_model_path or config.sft_model_path or config.model.name
+    logger.info(f"Policy model: {model_name}")
+    logger.info(f"Reward model: {reward_model_path}")
+    logger.info(f"GRPO β={config.grpo.beta}, loss_type={config.grpo.loss_type}")
+
+    # --- Load tokenizer ---
+    tokenizer = load_tokenizer(
+        config.model.name,
+        trust_remote_code=config.model.trust_remote_code,
+    )
+
+    # --- Build prompt dataset ---
+    prompt_dataset = _build_prompt_dataset(config, tokenizer)
+
+    # --- Create reward function ---
+    reward_fn = _create_reward_function(reward_model_path, config)
+
+    # --- Build PEFT config ---
+    peft_config = _build_lora_config(config.lora)
+
+    # --- Determine attention implementation ---
+    attn_impl = "flash_attention_2" if config.model.use_flash_attention else "eager"
+
+    # --- GRPO Config ---
+    model_init_kwargs = {
+        "trust_remote_code": config.model.trust_remote_code,
+        "attn_implementation": attn_impl,
+    }
+
+    if config.model.quantization == "4bit":
+        model_init_kwargs["quantization_config"] = {
+            "load_in_4bit": True,
+            "bnb_4bit_quant_type": "nf4",
+            "bnb_4bit_compute_dtype": "bfloat16",
+            "bnb_4bit_use_double_quant": True,
+        }
+    elif config.model.quantization == "8bit":
+        model_init_kwargs["quantization_config"] = {"load_in_8bit": True}
+
+    grpo_config = GRPOConfig(
+        output_dir=config.training.output_dir,
+        num_train_epochs=config.training.num_train_epochs,
+        max_steps=config.training.max_steps,
+        per_device_train_batch_size=config.training.per_device_train_batch_size,
+        gradient_accumulation_steps=config.training.gradient_accumulation_steps,
+        gradient_checkpointing=config.training.gradient_checkpointing,
+        learning_rate=config.training.learning_rate,
+        bf16=config.training.bf16,
+        fp16=config.training.fp16,
+        logging_steps=config.training.logging_steps,
+        save_steps=config.training.save_steps,
+        save_total_limit=config.training.save_total_limit,
+        max_grad_norm=config.training.max_grad_norm,
+        seed=config.training.seed,
+        report_to=config.training.report_to,
+        # GRPO-specific
+        num_generations=config.grpo.num_generations,
+        max_completion_length=config.grpo.max_completion_length,
+        temperature=config.grpo.temperature,
+        top_p=config.grpo.top_p,
+        beta=config.grpo.beta,
+        num_iterations=config.grpo.num_iterations,
+        loss_type=config.grpo.loss_type,
+        scale_rewards=config.grpo.scale_rewards,
+        # Model loading
+        model_init_kwargs=model_init_kwargs,
+        # Log completions for monitoring
+        log_completions=True,
+    )
+
+    # --- Create trainer ---
+    trainer = GRPOTrainer(
+        model=model_name,
+        reward_funcs=reward_fn,
+        args=grpo_config,
+        train_dataset=prompt_dataset["train"],
+        eval_dataset=prompt_dataset["eval"],
+        processing_class=tokenizer,
+        peft_config=peft_config,
+    )
+
+    # --- Train ---
+    logger.info("Starting GRPO training...")
+    train_result = trainer.train()
+
+    # --- Save ---
+    final_path = os.path.join(config.training.output_dir, "grpo-final")
+    trainer.save_model(final_path)
+    tokenizer.save_pretrained(final_path)
+
+    metrics = train_result.metrics
+    trainer.log_metrics("train", metrics)
+    trainer.save_metrics("train", metrics)
+    trainer.save_state()
+
+    logger.info(f"GRPO training complete. Model saved to: {final_path}")
+    logger.info(f"Training loss: {metrics.get('train_loss', 'N/A'):.4f}")
+
+    # Log GRPO-specific metrics
+    for key in ["reward", "reward_std", "kl", "completion_length"]:
+        full_key = f"train_{key}"
+        if full_key in metrics:
+            logger.info(f"  {key}: {metrics[full_key]:.4f}")
+
+    return final_path
+
+
+def run_rloo(
+    config: PipelineConfig,
+    reward_model_path: str,
+) -> str:
+    """
+    Fine-tune using RLOO (Reinforcement Learning with Leave-One-Out baseline).
+
+    Alternative to GRPO — uses REINFORCE with a leave-one-out baseline.
+    """
+    from trl import RLOOConfig, RLOOTrainer
+
+    from concordlm.models.loader import _build_lora_config, load_tokenizer
+
+    logger.info("=" * 60)
+    logger.info("  ConcordLM — Stage 3B: RLOO Policy Optimization")
+    logger.info("=" * 60)
+
     model_name = config.dpo_model_path or config.sft_model_path or config.model.name
     logger.info(f"Policy model: {model_name}")
     logger.info(f"Reward model: {reward_model_path}")
@@ -143,118 +405,64 @@ def run_ppo(
         trust_remote_code=config.model.trust_remote_code,
     )
 
-    # --- Load policy model with value head ---
-    bnb_config = _build_bnb_config(config.model)
-    model_kwargs = {}
-    if bnb_config:
-        model_kwargs["quantization_config"] = bnb_config
-    else:
-        model_kwargs["torch_dtype"] = _get_torch_dtype(config.model.dtype)
+    prompt_dataset = _build_prompt_dataset(config, tokenizer)
+    reward_fn = _create_reward_function(reward_model_path, config)
+    peft_config = _build_lora_config(config.lora)
 
-    model = AutoModelForCausalLMWithValueHead.from_pretrained(
-        model_name,
-        **model_kwargs,
-    )
+    attn_impl = "flash_attention_2" if config.model.use_flash_attention else "eager"
 
-    # --- Load reward pipeline ---
-    reward_pipe = hf_pipeline(
-        "text-classification",
-        model=reward_model_path,
-        tokenizer=tokenizer,
-        device_map="auto",
-        function_to_apply="none",  # Raw logits
-    )
-
-    # --- PPO Config ---
-    ppo_config = PPOConfig(
-        learning_rate=config.ppo.learning_rate,
-        batch_size=config.ppo.batch_size,
-        mini_batch_size=config.ppo.mini_batch_size,
-        ppo_epochs=config.ppo.ppo_epochs,
-        kl_penalty=config.ppo.kl_penalty,
-        init_kl_coef=config.ppo.init_kl_coef,
-        adap_kl_ctrl=config.ppo.adap_kl_ctrl,
-        target_kl=config.ppo.target_kl,
-        seed=config.training.seed,
-    )
-
-    # --- Load prompts from preference dataset ---
-    dataset = load_preference_dataset(config.data, tokenizer)
-    prompts = []
-    for example in dataset["train"]:
-        prompt = example["prompt"]
-        if isinstance(prompt, list):
-            # Conversational format — apply chat template
-            text = tokenizer.apply_chat_template(
-                prompt, tokenize=False, add_generation_prompt=True
-            )
-        else:
-            text = str(prompt)
-        prompts.append(text)
-
-    # --- PPO Training Loop ---
-    ppo_trainer = PPOTrainer(
-        config=ppo_config,
-        model=model,
-        tokenizer=tokenizer,
-    )
-
-    generation_kwargs = {
-        "max_new_tokens": config.ppo.max_new_tokens,
-        "temperature": config.ppo.temperature,
-        "top_p": config.ppo.top_p,
-        "do_sample": True,
-        "pad_token_id": tokenizer.pad_token_id,
+    model_init_kwargs = {
+        "trust_remote_code": config.model.trust_remote_code,
+        "attn_implementation": attn_impl,
     }
+    if config.model.quantization == "4bit":
+        model_init_kwargs["quantization_config"] = {
+            "load_in_4bit": True,
+            "bnb_4bit_quant_type": "nf4",
+            "bnb_4bit_compute_dtype": "bfloat16",
+            "bnb_4bit_use_double_quant": True,
+        }
 
-    logger.info("Starting PPO training loop...")
-    batch_size = config.ppo.batch_size
+    rloo_config = RLOOConfig(
+        output_dir=config.training.output_dir,
+        num_train_epochs=config.training.num_train_epochs,
+        max_steps=config.training.max_steps,
+        per_device_train_batch_size=config.training.per_device_train_batch_size,
+        gradient_accumulation_steps=config.training.gradient_accumulation_steps,
+        gradient_checkpointing=config.training.gradient_checkpointing,
+        learning_rate=config.training.learning_rate,
+        bf16=config.training.bf16,
+        fp16=config.training.fp16,
+        logging_steps=config.training.logging_steps,
+        save_steps=config.training.save_steps,
+        save_total_limit=config.training.save_total_limit,
+        seed=config.training.seed,
+        report_to=config.training.report_to,
+        model_init_kwargs=model_init_kwargs,
+    )
 
-    for step_idx in range(0, len(prompts), batch_size):
-        batch_prompts = prompts[step_idx : step_idx + batch_size]
-        if len(batch_prompts) < batch_size:
-            break  # Skip incomplete batches
+    trainer = RLOOTrainer(
+        model=model_name,
+        reward_funcs=reward_fn,
+        args=rloo_config,
+        train_dataset=prompt_dataset["train"],
+        eval_dataset=prompt_dataset["eval"],
+        processing_class=tokenizer,
+        peft_config=peft_config,
+    )
 
-        # Tokenize prompts
-        query_tensors = [
-            tokenizer.encode(p, return_tensors="pt").squeeze(0)
-            for p in batch_prompts
-        ]
+    logger.info("Starting RLOO training...")
+    train_result = trainer.train()
 
-        # Generate responses
-        response_tensors = ppo_trainer.generate(
-            query_tensors, **generation_kwargs
-        )
-
-        # Decode responses
-        responses = [
-            tokenizer.decode(r.squeeze(), skip_special_tokens=True)
-            for r in response_tensors
-        ]
-
-        # Get reward scores
-        full_texts = [p + r for p, r in zip(batch_prompts, responses)]
-        reward_outputs = reward_pipe(full_texts, batch_size=batch_size)
-        rewards = [torch.tensor(o["score"]) for o in reward_outputs]
-
-        # PPO step
-        stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
-        ppo_trainer.log_stats(stats, {"query": batch_prompts, "response": responses}, rewards)
-
-        if (step_idx // batch_size) % 10 == 0:
-            mean_reward = sum(r.item() for r in rewards) / len(rewards)
-            logger.info(
-                f"Step {step_idx // batch_size}: "
-                f"mean_reward={mean_reward:.4f}, "
-                f"kl={stats.get('objective/kl', 0):.4f}"
-            )
-
-    # --- Save ---
-    final_path = os.path.join(config.training.output_dir, "ppo-final")
-    ppo_trainer.save_pretrained(final_path)
+    final_path = os.path.join(config.training.output_dir, "rloo-final")
+    trainer.save_model(final_path)
     tokenizer.save_pretrained(final_path)
-    logger.info(f"PPO training complete. Model saved to: {final_path}")
 
+    metrics = train_result.metrics
+    trainer.log_metrics("train", metrics)
+    trainer.save_metrics("train", metrics)
+
+    logger.info(f"RLOO training complete. Model saved to: {final_path}")
     return final_path
 
 
@@ -265,19 +473,36 @@ def run_ppo(
 
 def run_rlhf(config: PipelineConfig) -> str:
     """
-    Execute the complete RLHF pipeline: reward model training → PPO.
+    Execute the complete RLHF pipeline: reward model training → policy optimization.
 
-    Returns path to the final PPO-trained model.
+    Supports two methods:
+      - "grpo" (default): Group Relative Policy Optimization
+      - "rloo": REINFORCE Leave-One-Out
+
+    Returns path to the final policy-optimized model.
     """
     logger.info("=" * 60)
     logger.info("  ConcordLM — Stage 3: Full RLHF Pipeline")
+    logger.info(f"  Method: {config.method}")
     logger.info("=" * 60)
 
-    # Phase A: Train reward model
-    reward_model_path = train_reward_model(config)
+    # Phase A: Train reward model (or use pre-trained one)
+    if config.reward_model_name_or_path:
+        reward_model_path = config.reward_model_name_or_path
+        logger.info(f"Using pre-trained reward model: {reward_model_path}")
+    else:
+        reward_model_path = train_reward_model(config)
 
-    # Phase B: PPO training
-    final_path = run_ppo(config, reward_model_path)
+    # Phase B: Policy optimization
+    method = config.method.lower()
+    if method == "grpo":
+        final_path = run_grpo(config, reward_model_path)
+    elif method == "rloo":
+        final_path = run_rloo(config, reward_model_path)
+    else:
+        raise ValueError(
+            f"Unknown RLHF method: {method}. Choose from: 'grpo', 'rloo'"
+        )
 
     return final_path
 
@@ -290,23 +515,31 @@ def run_rlhf(config: PipelineConfig) -> str:
 def main():
     """CLI entry point for RLHF training."""
     parser = argparse.ArgumentParser(
-        description="ConcordLM — Stage 3: RLHF (Reward Model + PPO)"
+        description="ConcordLM — Stage 3: RLHF (Reward Model + Policy Optimization)"
     )
     parser.add_argument(
         "--config", type=str, default="configs/rlhf.yaml",
         help="Path to the RLHF config YAML file",
     )
     parser.add_argument(
-        "--override", type=str, nargs="*", default=[],
+        "--override", type=str, action="append", default=[],
         help="Config overrides in dot-notation",
     )
     parser.add_argument(
-        "--reward-model-only", action="store_true",
-        help="Only train the reward model (skip PPO)",
+        "--method", type=str, default=None, choices=["grpo", "rloo"],
+        help="Policy optimization method (overrides config)",
     )
     parser.add_argument(
-        "--ppo-only", type=str, default=None,
-        help="Only run PPO with given reward model path (skip reward model training)",
+        "--reward-model-only", action="store_true",
+        help="Only train the reward model (skip policy optimization)",
+    )
+    parser.add_argument(
+        "--policy-only", type=str, default=None,
+        help="Only run policy optimization with given reward model path",
+    )
+    parser.add_argument(
+        "--reward-model", type=str, default=None,
+        help="Use a pre-trained reward model (skip reward model training)",
     )
     args = parser.parse_args()
 
@@ -315,12 +548,24 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    config = load_config(args.config, overrides=args.override)
+    overrides = list(args.override)
+    if args.method:
+        overrides.append(f"method={args.method}")
+    if args.reward_model:
+        overrides.append(f"reward_model_name_or_path={args.reward_model}")
+
+    config = load_config(args.config, overrides=overrides)
 
     if args.reward_model_only:
         train_reward_model(config)
-    elif args.ppo_only:
-        run_ppo(config, args.ppo_only)
+    elif args.policy_only:
+        method = config.method.lower()
+        if method == "grpo":
+            run_grpo(config, args.policy_only)
+        elif method == "rloo":
+            run_rloo(config, args.policy_only)
+        else:
+            raise ValueError(f"Unknown method: {method}")
     else:
         run_rlhf(config)
 

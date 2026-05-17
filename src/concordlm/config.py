@@ -100,7 +100,6 @@ class DPOSpecificConfig:
     loss_type: str = "sigmoid"
     label_smoothing: float = 0.0
     max_length: int = 1024
-    max_prompt_length: int = 512
 
 
 @dataclass
@@ -115,20 +114,17 @@ class RewardModelConfig:
 
 
 @dataclass
-class PPOSpecificConfig:
-    """PPO-specific hyper-parameters (RLHF)."""
+class GRPOSpecificConfig:
+    """GRPO-specific hyper-parameters (modern RLHF via TRL v1.0)."""
 
-    learning_rate: float = 1e-6
-    batch_size: int = 16
-    mini_batch_size: int = 4
-    ppo_epochs: int = 4
-    kl_penalty: str = "kl"
-    init_kl_coef: float = 0.2
-    adap_kl_ctrl: bool = True
-    target_kl: float = 6.0
-    max_new_tokens: int = 256
+    num_generations: int = 4           # Number of generations per prompt
+    max_completion_length: int = 256   # Max tokens per completion
     temperature: float = 0.7
     top_p: float = 0.9
+    beta: float = 0.04                 # KL penalty coefficient
+    num_iterations: int = 1            # Number of GRPO iterations per batch
+    loss_type: str = "grpo"            # "grpo" | "dapo" | "dr_grpo"
+    scale_rewards: str = "group"       # "group" | "none" | "running_mean"
 
 
 @dataclass
@@ -136,15 +132,17 @@ class PipelineConfig:
     """Top-level config container for the full ConcordLM pipeline."""
 
     stage: str = "sft"
+    method: str = "grpo"               # RLHF method: "grpo" | "rloo"
     model: ModelConfig = field(default_factory=ModelConfig)
     lora: LoRAConfig = field(default_factory=LoRAConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     data: DataConfig = field(default_factory=DataConfig)
     dpo: DPOSpecificConfig = field(default_factory=DPOSpecificConfig)
     reward_model: RewardModelConfig = field(default_factory=RewardModelConfig)
-    ppo: PPOSpecificConfig = field(default_factory=PPOSpecificConfig)
+    grpo: GRPOSpecificConfig = field(default_factory=GRPOSpecificConfig)
     sft_model_path: Optional[str] = None
     dpo_model_path: Optional[str] = None
+    reward_model_name_or_path: Optional[str] = None  # Pre-trained reward model
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +208,7 @@ def _coerce_value(v: str) -> Any:
         return True
     if v.lower() == "false":
         return False
-    if v.lower() == "null" or v.lower() == "none":
+    if v.lower() == "null":
         return None
     try:
         return int(v)
@@ -251,7 +249,7 @@ def _resolve_type(type_hint) -> type | None:
         "DataConfig": DataConfig,
         "DPOSpecificConfig": DPOSpecificConfig,
         "RewardModelConfig": RewardModelConfig,
-        "PPOSpecificConfig": PPOSpecificConfig,
+        "GRPOSpecificConfig": GRPOSpecificConfig,
     }
     if isinstance(type_hint, str):
         return type_map.get(type_hint)

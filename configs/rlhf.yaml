@@ -1,11 +1,15 @@
 # ============================================================
-# ConcordLM — RLHF (PPO) Configuration
-# Stage 3 (Optional): Reward model + PPO fine-grained alignment
+# ConcordLM — RLHF Configuration
+# Stage 3 (Optional): Reward model + Policy optimization
+#
+# TRL v1.0 — Uses GRPOTrainer (Group Relative Policy Optimization)
+# which replaces the deprecated PPOTrainer.
 # ============================================================
 
 inherit: base.yaml
 
 stage: "rlhf"
+method: "grpo"                       # "grpo" (recommended) | "rloo"
 
 training:
   output_dir: "./outputs/rlhf"
@@ -20,23 +24,23 @@ reward_model:
   per_device_train_batch_size: 4
   max_length: 512
 
-ppo:
-  learning_rate: 1.0e-6
-  batch_size: 16
-  mini_batch_size: 4
-  ppo_epochs: 4
-  kl_penalty: "kl"              # "kl" | "abs" | "mse" | "full"
-  init_kl_coef: 0.2
-  adap_kl_ctrl: true
-  target_kl: 6.0
-  max_new_tokens: 256
+grpo:
+  num_generations: 4                 # Completions per prompt (higher = better but slower)
+  max_completion_length: 256         # Max tokens per completion
   temperature: 0.7
   top_p: 0.9
+  beta: 0.04                        # KL penalty coefficient
+  num_iterations: 1                  # GRPO iterations per batch
+  loss_type: "grpo"                  # "grpo" | "dapo" | "dr_grpo"
+  scale_rewards: "group"             # "group" | "none" | "running_mean"
 
 data:
   dataset_name: "trl-lib/ultrafeedback_binarized"
   dataset_split: "train"
 
 # Paths to prior stage outputs
-sft_model_path: null             # Path to SFT model
-dpo_model_path: null             # Optional: start from DPO model instead
+sft_model_path: null                 # Path to SFT model
+dpo_model_path: null                 # Optional: start from DPO model instead
+
+# Pre-trained reward model (if not training your own)
+reward_model_name_or_path: null      # e.g., "weqweasdas/RM-Gemma-2B"

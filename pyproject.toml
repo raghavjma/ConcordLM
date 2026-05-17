@@ -46,6 +46,7 @@ concordlm-dpo = "concordlm.trainers.dpo:main"
 concordlm-rlhf = "concordlm.trainers.rlhf:main"
 concordlm-eval = "concordlm.eval.benchmark:main"
 concordlm-generate = "concordlm.inference.generate:main"
+concordlm-pipeline = "concordlm.trainers.pipeline:run_full_pipeline"
 concordlm-web = "web.app:main"
 
 [tool.setuptools.packages.find]

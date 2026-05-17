@@ -18,7 +18,6 @@ dpo:
   loss_type: "sigmoid"           # "sigmoid" | "ipo" | "hinge" | "robust"
   label_smoothing: 0.0
   max_length: 1024
-  max_prompt_length: 512
 
 data:
   dataset_name: "trl-lib/ultrafeedback_binarized"

@@ -121,7 +121,7 @@ def main():
         help="Path to the SFT config YAML file",
     )
     parser.add_argument(
-        "--override", type=str, nargs="*", default=[],
+        "--override", type=str, action="append", default=[],
         help="Config overrides in dot-notation (e.g. model.name=... training.max_steps=5)",
     )
     args = parser.parse_args()

@@ -15,6 +15,9 @@ let currentConfigTab = 'base';
 let pipelineStatus = null;
 let pairCounter = 0;
 let activeWebSockets = {};
+let currentChatHistory = [];
+let activeModelPath = "Qwen/Qwen2.5-1.5B-Instruct";
+let activeAbortController = null;
 
 // ══════════════════════════════════════════════════════════════
 // Navigation
@@ -39,11 +42,11 @@ function navigateTo(page) {
   currentPage = page;
 
   // Trigger page-specific loads
+  if (page === 'dashboard') refreshStatus();
   if (page === 'config') loadConfig(currentConfigTab);
   if (page === 'models') loadModels();
   if (page === 'datasets') loadDatasets();
   if (page === 'evaluation') loadEvalReport();
-  if (page === 'dashboard') refreshStatus();
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -98,6 +101,15 @@ async function apiPost(path, body) {
 async function refreshStatus() {
   try {
     pipelineStatus = await apiGet('/api/status');
+    const inputModel = document.getElementById('chatModelPath')?.value;
+    if (inputModel) activeModelPath = inputModel.trim();
+    
+    // Override local pipeline statuses with mathematically inferred status
+    pipelineStatus.pipeline = guessPipelineStages(activeModelPath);
+    
+    const sub = document.getElementById('dashboardSubtitle');
+    if (sub) sub.innerHTML = `Active Pipeline Analyzed: <span class="tag tag-indigo" style="font-family:var(--font-mono)">${activeModelPath}</span>`;
+
     updateDashboard(pipelineStatus);
     
     // Also load models count
@@ -111,6 +123,20 @@ async function refreshStatus() {
   }
 }
 
+function guessPipelineStages(modelPath) {
+  const p = modelPath.toLowerCase();
+  const isSft = p.includes('instruct') || p.includes('chat') || p.includes('sft') || p.includes('custom');
+  const isDpo = p.includes('dpo') || p.includes('preference');
+  const isRlhf = p.includes('rlhf') || p.includes('ppo');
+  
+  return {
+      sft: { completed: isSft || isDpo || isRlhf },
+      dpo: { completed: isDpo || isRlhf },
+      rlhf: { completed: isRlhf },
+      reward_model: { completed: isRlhf }
+  };
+}
+
 function updateDashboard(status) {
   const { pipeline, active_jobs, eval_report } = status;
 
@@ -118,6 +144,23 @@ function updateDashboard(status) {
   const stages = ['sft', 'dpo', 'rlhf'];
   let completedCount = 0;
   let currentStage = 'Ready';
+
+  stages.forEach(stage => {
+    const nodeEl = document.getElementById(`node-${stage}`);
+    if (nodeEl) nodeEl.classList.remove('completed');
+    const statusEl = document.getElementById(`${stage}-status`);
+    if (statusEl) {
+        statusEl.innerHTML = stage === 'rlhf' ? '<span class="tag tag-cyan">Optional</span>' : '<span class="tag tag-amber">Pending</span>';
+    }
+    const stageStatusEl = document.getElementById(`${stage}-stage-status`);
+    if (stageStatusEl) {
+        stageStatusEl.className = 'stage-status pending';
+        stageStatusEl.textContent = '⏳ Pending';
+    }
+  });
+
+  document.getElementById('arrow-sft')?.classList.remove('completed');
+  document.getElementById('arrow-dpo')?.classList.remove('completed');
 
   stages.forEach(stage => {
     const completed = pipeline[stage]?.completed;
@@ -639,6 +682,14 @@ async function runEvaluation() {
     });
     showToast(`Evaluation started: ${result.job_id}`, 'success');
     monitorJob(result.job_id, 'eval');
+    
+    document.getElementById('evalResults').innerHTML = `
+      <div class="empty-state">
+        <div class="spinner" style="width:34px;height:34px;border-width:4px;margin: 0 auto 20px auto;border-top-color:var(--accent-primary)"></div>
+        <h3>Running Matrix Benchmarks...</h3>
+        <p>The AI is currently processing thousands of test prompts in the background.<br>This usually takes 1 to 5 minutes.</p>
+      </div>
+    `;
 
     // Poll for results
     const poller = setInterval(async () => {
@@ -753,6 +804,27 @@ function renderEvalResults(report) {
 async function sendChat() {
   const input = document.getElementById('chatInput');
   const modelPath = document.getElementById('chatModelPath').value;
+  const sendBtn = document.getElementById('chatSendBtn');
+
+  if (activeAbortController) {
+    activeAbortController.abort();
+    activeAbortController = null;
+    
+    fetch('/api/chat/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_path: modelPath })
+    }).catch(() => {});
+    
+    sendBtn.disabled = false;
+    sendBtn.innerHTML = 'Send →';
+    sendBtn.className = 'btn btn-primary';
+    input.focus();
+    
+    // Let the stream throw finish silently
+    return;
+  }
+
   const message = input.value.trim();
 
   if (!message) return;
@@ -767,34 +839,89 @@ async function sendChat() {
 
   // Add user message
   addChatMessage(message, 'user');
+  currentChatHistory.push({ role: 'user', content: message });
   input.value = '';
 
   // Show typing indicator
   const typingEl = addTypingIndicator();
 
-  // Disable input
-  const sendBtn = document.getElementById('chatSendBtn');
-  sendBtn.disabled = true;
-  sendBtn.innerHTML = '<span class="spinner"></span>';
+  // Disable input and shift to Stop Generating mode
+  sendBtn.innerHTML = '⏹ Stop Generating';
+  sendBtn.className = 'btn btn-danger';
+  activeAbortController = new AbortController();
 
   try {
-    const result = await apiPost('/api/chat', {
-      message,
-      model_path: modelPath,
-      max_new_tokens: 512,
-      temperature: 0.7,
-      top_p: 0.9,
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: currentChatHistory,
+        model_path: modelPath,
+        max_new_tokens: 512,
+        temperature: 0.7,
+        top_p: 0.9,
+        stream: true
+      }),
+      signal: activeAbortController.signal
     });
 
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(err.detail || response.statusText);
+    }
+
     typingEl.remove();
-    addChatMessage(result.response, 'assistant');
+    
+    // Create empty bubble for streaming
+    const messagesEl = document.getElementById('chatMessages');
+    const msg = document.createElement('div');
+    msg.className = 'chat-message assistant';
+    msg.innerHTML = `
+      <div class="chat-sender">ConcordLM</div>
+      <div class="chat-bubble" id="streaming-bubble"></div>
+    `;
+    messagesEl.appendChild(msg);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    
+    const bubbleContent = msg.querySelector('#streaming-bubble');
+    let fullText = '';
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      
+      // Smart Auto-Scroll Detection: Check if user is scrolled up
+      const isAtBottom = (messagesEl.scrollHeight - messagesEl.clientHeight <= messagesEl.scrollTop + 50);
+      
+      const chunk = decoder.decode(value, { stream: true });
+      fullText += chunk;
+      bubbleContent.innerHTML = formatChatText(fullText);
+      
+      // Only force scroll down if they haven't manually scrolled up
+      if (isAtBottom) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    }
+    
+    bubbleContent.removeAttribute('id');
+    currentChatHistory.push({ role: 'assistant', content: fullText });
   } catch (err) {
+    if (err.name === 'AbortError') {
+      typingEl.remove();
+      addChatMessage("*(Generation Aborted)*", 'assistant');
+      return; // Skip normal finalizer since abort handles UI reset
+    }
     typingEl.remove();
     addChatMessage(`Error: ${err.message}`, 'assistant');
     showToast(`Chat error: ${err.message}`, 'error');
   } finally {
+    activeAbortController = null;
     sendBtn.disabled = false;
     sendBtn.innerHTML = 'Send →';
+    sendBtn.className = 'btn btn-primary';
     input.focus();
   }
 }
@@ -892,6 +1019,7 @@ function selectModel(path) {
 
 function navigateToChat(path) {
   document.getElementById('chatModelPath').value = path;
+  activeModelPath = path;
   navigateTo('chat');
 }
 

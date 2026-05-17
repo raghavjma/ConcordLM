@@ -57,14 +57,14 @@ def _build_bnb_config(model_config: ModelConfig) -> BitsAndBytesConfig | None:
     return None
 
 
-def _build_lora_config(lora_dc: LoRAConfigDC) -> LoraConfig:
+def _build_lora_config(lora_dc: LoRAConfigDC, task_type: TaskType = TaskType.CAUSAL_LM) -> LoraConfig:
     """Convert our dataclass LoRA config to a PEFT LoraConfig."""
     return LoraConfig(
         r=lora_dc.r,
         lora_alpha=lora_dc.alpha,
         lora_dropout=lora_dc.dropout,
         bias=lora_dc.bias,
-        task_type=TaskType.CAUSAL_LM,
+        task_type=task_type,
         target_modules=lora_dc.target_modules,
     )
 
@@ -192,15 +192,36 @@ def load_model_for_inference(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoPeftModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=_get_torch_dtype(dtype),
-        device_map=device,
-    )
+    kwargs = {}
+    if device in ("mps", "cpu"):
+        kwargs["low_cpu_mem_usage"] = True
+    else:
+        kwargs["device_map"] = device
 
-    if merge_adapter:
-        logger.info("Merging LoRA adapter into base model...")
-        model = model.merge_and_unload()
+    try:
+        model = AutoPeftModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=_get_torch_dtype(dtype),
+            **kwargs,
+        )
+        
+        if device in ("mps", "cpu"):
+            model = model.to(device)
+            
+        if merge_adapter:
+            logger.info("Merging LoRA adapter into base model...")
+            model = model.merge_and_unload()
+    except Exception as e:
+        logger.info(f"Model is not a PEFT adapter, loading as standard model: {e}")
+        from transformers import AutoModelForCausalLM
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=_get_torch_dtype(dtype),
+            **kwargs,
+        )
+        
+        if device in ("mps", "cpu"):
+            model = model.to(device)
 
     model.eval()
     return model, tokenizer
@@ -245,6 +266,7 @@ def load_reward_model(
     if model_config.quantization in ("4bit", "8bit"):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
 
-    peft_config = _build_lora_config(lora_config)
+    from peft import TaskType
+    peft_config = _build_lora_config(lora_config, task_type=TaskType.SEQ_CLS)
 
     return model, tokenizer, peft_config
