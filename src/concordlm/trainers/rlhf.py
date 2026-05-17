@@ -264,6 +264,7 @@ def run_grpo(
 
     from concordlm.models.loader import (
         _build_lora_config,
+        load_model,
         load_tokenizer,
     )
 
@@ -277,20 +278,23 @@ def run_grpo(
     logger.info(f"Reward model: {reward_model_path}")
     logger.info(f"GRPO β={config.grpo.beta}, loss_type={config.grpo.loss_type}")
 
-    # --- Load tokenizer ---
-    tokenizer = load_tokenizer(
-        config.model.name,
-        trust_remote_code=config.model.trust_remote_code,
-    )
+    # --- Load model and tokenizer ---
+    try:
+        from peft import PeftModel
+        logger.info(f"Attempting to load policy as PEFT model: {model_name}")
+        base_model, tokenizer, _ = load_model(config.model, peft_config=None)
+        model = PeftModel.from_pretrained(base_model, model_name, is_trainable=True)
+        peft_config = None
+        logger.info("Loaded policy model as PEFT adapter.")
+    except Exception as e:
+        logger.info(f"Loading policy as standard model. ({e})")
+        model, tokenizer, peft_config = load_model(config.model, config.lora)
 
     # --- Build prompt dataset ---
     prompt_dataset = _build_prompt_dataset(config, tokenizer)
 
     # --- Create reward function ---
     reward_fn = _create_reward_function(reward_model_path, config)
-
-    # --- Build PEFT config ---
-    peft_config = _build_lora_config(config.lora)
 
     # --- Determine attention implementation ---
     attn_impl = "flash_attention_2" if config.model.use_flash_attention else "eager"
@@ -344,7 +348,7 @@ def run_grpo(
 
     # --- Create trainer ---
     trainer = GRPOTrainer(
-        model=model_name,
+        model=model,
         reward_funcs=reward_fn,
         args=grpo_config,
         train_dataset=prompt_dataset["train"],
@@ -390,7 +394,7 @@ def run_rloo(
     """
     from trl import RLOOConfig, RLOOTrainer
 
-    from concordlm.models.loader import _build_lora_config, load_tokenizer
+    from concordlm.models.loader import load_model, load_tokenizer
 
     logger.info("=" * 60)
     logger.info("  ConcordLM — Stage 3B: RLOO Policy Optimization")
@@ -400,14 +404,20 @@ def run_rloo(
     logger.info(f"Policy model: {model_name}")
     logger.info(f"Reward model: {reward_model_path}")
 
-    tokenizer = load_tokenizer(
-        config.model.name,
-        trust_remote_code=config.model.trust_remote_code,
-    )
+    # --- Load model and tokenizer ---
+    try:
+        from peft import PeftModel
+        logger.info(f"Attempting to load policy as PEFT model: {model_name}")
+        base_model, tokenizer, _ = load_model(config.model, peft_config=None)
+        model = PeftModel.from_pretrained(base_model, model_name, is_trainable=True)
+        peft_config = None
+        logger.info("Loaded policy model as PEFT adapter.")
+    except Exception as e:
+        logger.info(f"Loading policy as standard model. ({e})")
+        model, tokenizer, peft_config = load_model(config.model, config.lora)
 
     prompt_dataset = _build_prompt_dataset(config, tokenizer)
     reward_fn = _create_reward_function(reward_model_path, config)
-    peft_config = _build_lora_config(config.lora)
 
     attn_impl = "flash_attention_2" if config.model.use_flash_attention else "eager"
 
@@ -442,7 +452,7 @@ def run_rloo(
     )
 
     trainer = RLOOTrainer(
-        model=model_name,
+        model=model,
         reward_funcs=reward_fn,
         args=rloo_config,
         train_dataset=prompt_dataset["train"],
