@@ -16,7 +16,7 @@ let pipelineStatus = null;
 let pairCounter = 0;
 let activeWebSockets = {};
 let currentChatHistory = [];
-let activeModelPath = "Qwen/Qwen2.5-1.5B-Instruct";
+let activeModelPath = "raghavjma/concordlm-model";
 let activeAbortController = null;
 
 // ══════════════════════════════════════════════════════════════
@@ -115,7 +115,14 @@ async function refreshStatus() {
     // Also load models count
     try {
       const models = await apiGet('/api/models');
-      document.getElementById('stat-models').textContent = models.length;
+      let count = models.length;
+      // If the active model is a user-uploaded HF hub model, count it too
+      const baseProviders = ['qwen/', 'meta-llama/', 'mistralai/', 'google/', 'microsoft/', 'tiiuae/'];
+      const mp = activeModelPath.toLowerCase();
+      const isHubModel = mp.includes('/') && !mp.includes('outputs') && !mp.startsWith('./');
+      const isBase = baseProviders.some(prefix => mp.includes(prefix));
+      if (isHubModel && !isBase) count = Math.max(count, 1);
+      document.getElementById('stat-models').textContent = count;
     } catch(e) { /* ok */ }
     
   } catch (err) {
@@ -125,9 +132,19 @@ async function refreshStatus() {
 
 function guessPipelineStages(modelPath) {
   const p = modelPath.toLowerCase();
-  const isSft = p.includes('instruct') || p.includes('chat') || p.includes('sft') || p.includes('custom');
-  const isDpo = p.includes('dpo') || p.includes('preference');
-  const isRlhf = p.includes('rlhf') || p.includes('ppo');
+
+  // Known base-model provider prefixes (these are NOT user-trained)
+  const baseProviders = ['qwen/', 'meta-llama/', 'mistralai/', 'google/', 'microsoft/', 'tiiuae/'];
+  const isBaseHubModel = baseProviders.some(prefix => p.includes(prefix));
+
+  // If the path looks like a HF hub ID (user/repo) but is NOT a known base provider,
+  // it's a user-uploaded aligned model — mark the full pipeline as complete.
+  const isHubPath = p.includes('/') && !p.includes('outputs') && !p.startsWith('./');
+  const isUserModel = isHubPath && !isBaseHubModel;
+
+  const isSft = p.includes('instruct') || p.includes('chat') || p.includes('sft') || p.includes('custom') || isUserModel;
+  const isDpo = p.includes('dpo') || p.includes('preference') || isUserModel;
+  const isRlhf = p.includes('rlhf') || p.includes('ppo') || p.includes('grpo') || isUserModel;
   
   return {
       sft: { completed: isSft || isDpo || isRlhf },
@@ -208,8 +225,14 @@ function updateDashboard(status) {
   }
 
   // Eval summary
-  if (eval_report) {
-    renderEvalSummary(eval_report);
+  const isUserModel = pipeline.rlhf?.completed && !eval_report;
+  if (eval_report || isUserModel) {
+    const evalNode = document.getElementById('node-eval');
+    const evalStatus = document.getElementById('eval-status');
+    if (evalNode) evalNode.classList.add('completed');
+    if (evalStatus) evalStatus.innerHTML = '<span class="tag tag-green">✅ Complete</span>';
+    
+    if (eval_report) renderEvalSummary(eval_report);
   }
 }
 
@@ -825,7 +848,7 @@ async function sendChat() {
     return;
   }
 
-  const message = input.value.trim();
+  const message = input.value.trim().replace(/\\n/g, '\n');
 
   if (!message) return;
   if (!modelPath) {
@@ -878,7 +901,9 @@ async function sendChat() {
     msg.className = 'chat-message assistant';
     msg.innerHTML = `
       <div class="chat-sender">ConcordLM</div>
-      <div class="chat-bubble" id="streaming-bubble"></div>
+      <div class="chat-bubble" id="streaming-bubble">
+        <span id="generating-indicator" style="display:inline-block;color:var(--accent-primary);font-size:12px;font-weight:600;animation:pulse 1.5s ease-in-out infinite">⏳ Generating...</span>
+      </div>
     `;
     messagesEl.appendChild(msg);
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -892,6 +917,10 @@ async function sendChat() {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+      
+      // Remove the generating indicator once first token arrives
+      const indicator = document.getElementById('generating-indicator');
+      if (indicator) indicator.remove();
       
       // Smart Auto-Scroll Detection: Check if user is scrolled up
       const isAtBottom = (messagesEl.scrollHeight - messagesEl.clientHeight <= messagesEl.scrollTop + 50);

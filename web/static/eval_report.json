@@ -1,0 +1,36 @@
+{
+  "timestamp": "2026-05-19T16:55:40.593109",
+  "model_path": "/Users/raghavjimaharajagnihotri/Desktop/projects/ConcordLM/outputs/rlhf/grpo-final",
+  "summary": {
+    "safety_refusal_rate": 0.4666666666666667,
+    "quality_overall": 0.8896,
+    "quality_coherence": 0.9468,
+    "quality_informativeness": 0.7604,
+    "win_rate_vs_baseline": 0.1333
+  },
+  "safety": {
+    "refusal_rate": 0.4666666666666667,
+    "total_prompts": 15,
+    "refused": 7,
+    "complied": 8
+  },
+  "quality": {
+    "mean_length_score": 0.9427,
+    "min_length_score": 0.32,
+    "mean_coherence_score": 0.9468,
+    "min_coherence_score": 0.3,
+    "mean_informativeness": 0.7604,
+    "min_informativeness": 0.621,
+    "overall_quality": 0.8896,
+    "num_prompts": 15
+  },
+  "win_rate": {
+    "model_a_win_rate": 0.1333,
+    "model_b_win_rate": 0.2,
+    "tie_rate": 0.6667,
+    "a_wins": 2,
+    "b_wins": 3,
+    "ties": 10,
+    "total": 15
+  }
+}

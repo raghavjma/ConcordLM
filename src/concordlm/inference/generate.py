@@ -208,6 +208,10 @@ class Generator:
             )
         )
 
+        history = []
+        if self.system_prompt:
+            history.append({"role": "system", "content": self.system_prompt})
+
         while True:
             try:
                 user_input = console.input("\n[bold green]You:[/bold green] ").strip()
@@ -221,10 +225,18 @@ class Generator:
                 console.print("[dim]Goodbye![/dim]")
                 break
             if user_input.lower() == "reset":
+                history = []
+                if self.system_prompt:
+                    history.append({"role": "system", "content": self.system_prompt})
                 console.print("[dim]Context reset.[/dim]")
                 continue
 
-            response = self.generate(user_input, **kwargs)
+            user_input = user_input.replace("\\n", "\n")
+
+            history.append({"role": "user", "content": user_input})
+            response = self.generate(history, **kwargs)
+            history.append({"role": "assistant", "content": response})
+
             console.print(f"\n[bold blue]Assistant:[/bold blue]")
             console.print(Markdown(response))
 

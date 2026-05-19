@@ -472,6 +472,9 @@ async def run_evaluation(req: EvalRequest):
 async def get_eval_report():
     """Get the latest evaluation report."""
     report_path = OUTPUTS_DIR / "eval" / "eval_report.json"
+    # Fallback: check bundled report for cloud deployments
+    if not report_path.exists():
+        report_path = STATIC_DIR / "eval_report.json"
     if not report_path.exists():
         raise HTTPException(404, "No evaluation report found")
     with open(report_path) as f:

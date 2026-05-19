@@ -91,7 +91,7 @@ def train_reward_model(config: PipelineConfig) -> str:
 
     # --- Train ---
     logger.info("Starting reward model training...")
-    train_result = trainer.train()
+    train_result = trainer.train(resume_from_checkpoint=config.training.resume_from_checkpoint)
 
     # --- Save ---
     final_path = os.path.join(config.reward_model.output_dir, "checkpoint-final")
@@ -368,7 +368,7 @@ def run_grpo(
 
     # --- Train ---
     logger.info("Starting GRPO training...")
-    train_result = trainer.train()
+    train_result = trainer.train(resume_from_checkpoint=config.training.resume_from_checkpoint)
 
     # --- Save ---
     final_path = os.path.join(config.training.output_dir, "grpo-final")
@@ -481,7 +481,7 @@ def run_rloo(
     )
 
     logger.info("Starting RLOO training...")
-    train_result = trainer.train()
+    train_result = trainer.train(resume_from_checkpoint=config.training.resume_from_checkpoint)
 
     final_path = os.path.join(config.training.output_dir, "rloo-final")
     trainer.save_model(final_path)

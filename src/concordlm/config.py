@@ -76,6 +76,7 @@ class TrainingConfig:
     seed: int = 42
     report_to: str = "tensorboard"
     dataloader_num_workers: int = 4
+    resume_from_checkpoint: Optional[str] = None
 
 
 @dataclass

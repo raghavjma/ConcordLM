@@ -417,7 +417,7 @@
           <div class="subtitle">Interactive conversation with your aligned model</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
-          <input class="form-input" type="text" id="chatModelPath" placeholder="./outputs/dpo/checkpoint-final" style="width:300px;font-size:12px" />
+          <input class="form-input" type="text" id="chatModelPath" value="raghavjma/concordlm-model" style="width:300px;font-size:12px" />
         </div>
       </div>
       <div class="content-body" style="padding:0">
@@ -430,7 +430,7 @@
             </div>
           </div>
           <div class="chat-input-area">
-            <input class="form-input" type="text" id="chatInput" placeholder="Type your message..." onkeydown="if(event.key==='Enter')sendChat()" autocomplete="off" />
+            <textarea class="form-input" id="chatInput" placeholder="Type your message... (Shift+Enter for new line)" onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); }" autocomplete="off" style="resize:vertical; min-height:42px; padding-top:10px;"></textarea>
             <button class="btn btn-primary" onclick="sendChat()" id="chatSendBtn">
               Send →
             </button>
