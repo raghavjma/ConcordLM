@@ -1,4 +1,4 @@
-# ConcordLM 🔮
+# ConcordLM
 
 An end-to-end LLM alignment pipeline designed for aligning open-source models (Llama 3, Mistral, Qwen) using Supervised Fine-Tuning (SFT), Direct Preference Optimization (DPO), and Reinforcement Learning from Human Feedback (RLHF). Includes a premium web dashboard for managing the ml-pipeline.
 
